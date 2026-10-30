@@ -134,7 +134,7 @@ using:
 supabase functions deploy delete-contact --project-ref <project-ref>
 ```
 
-Hosted Supabase functions provide `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` as environment variables.
+Hosted Supabase functions provide `SUPABASE_URL` and `SUPABASE_SECRET_KEYS` as environment variables; the function uses the `default` secret key, which never leaves the function.
 
 The deployed function only accepts an authenticated request to delete the requesting user's own linked account.
 

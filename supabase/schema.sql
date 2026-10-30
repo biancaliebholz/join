@@ -68,13 +68,18 @@ create index if not exists tasks_status_board_order_idx on public.tasks (status,
 alter table public."demoDB" enable row level security;
 alter table public.tasks enable row level security;
 
+-- Demo contacts (no linked account) stay shared, so the guest demo works.
+-- The contact row of a registered user holds their real name and email, so
+-- only that user may read or change it; everyone else never receives it,
+-- neither via the REST API nor via Realtime.
 drop policy if exists "join_public_access_demoDB" on public."demoDB";
-create policy "join_public_access_demoDB"
+drop policy if exists "join_demo_or_own_contact" on public."demoDB";
+create policy "join_demo_or_own_contact"
   on public."demoDB"
   for all
   to anon, authenticated
-  using (true)
-  with check (true);
+  using (auth_user_id is null or auth_user_id = (select auth.uid()))
+  with check (auth_user_id is null or auth_user_id = (select auth.uid()));
 
 drop policy if exists "join_public_access_tasks" on public.tasks;
 create policy "join_public_access_tasks"
@@ -88,6 +93,14 @@ grant usage on schema public to anon, authenticated;
 grant all on table public."demoDB" to anon, authenticated;
 grant all on table public.tasks to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
+
+-- The delete-contact edge function uses the project's secret key, i.e. the
+-- service_role (bypasses RLS). New Supabase projects no longer grant table
+-- access to it automatically, so it is granted explicitly here.
+grant usage on schema public to service_role;
+grant all on table public."demoDB" to service_role;
+grant all on table public.tasks to service_role;
+grant usage, select on all sequences in schema public to service_role;
 
 alter table public."demoDB" replica identity full;
 alter table public.tasks replica identity full;
@@ -116,3 +129,111 @@ begin
     end if;
   end if;
 end $$;
+
+-- Demo data -------------------------------------------------------------
+-- reset_demo_data() restores a fixed, fictional demo state for the guest
+-- demo: it removes all tasks and all shared demo contacts and inserts the
+-- seed below. Accounts of registered users and their own contact rows are
+-- kept. Due dates are relative to today, so the summary stays meaningful.
+-- It is only callable from inside the database (SQL editor, pg_cron),
+-- never through the API – see the revoke below.
+create or replace function public.reset_demo_data()
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  delete from public.tasks where true;
+  delete from public."demoDB" where auth_user_id is null;
+
+  -- Fictional people; example.com is reserved for documentation, the phone
+  -- numbers come from the range reserved for fiction (030 23125 xxx); the app
+  -- shows them with its own "+49 " prefix, so they are stored without it.
+  insert into public."demoDB" (name, email, phone) values
+    ('Anna Becker', 'anna.becker@example.com', 3023125001),
+    ('Ben Hoffmann', 'ben.hoffmann@example.com', 3023125002),
+    ('Clara Schulz', 'clara.schulz@example.com', 3023125003),
+    ('David Wagner', 'david.wagner@example.com', 3023125004),
+    ('Emma Fischer', 'emma.fischer@example.com', 3023125005),
+    ('Felix Weber', 'felix.weber@example.com', 3023125006),
+    ('Greta Schneider', 'greta.schneider@example.com', 3023125007),
+    ('Jonas Richter', 'jonas.richter@example.com', 3023125008);
+
+  insert into public.tasks (
+    title, description, category, type, "dueDate", due_date, priority,
+    "assignedTo", "assignedToNames", subtasks, board_order, status
+  )
+  select
+    t.title, t.description, 'category-0', t.type,
+    current_date + t.due_in, current_date + t.due_in, t.priority,
+    array(
+      select c.id from public."demoDB" c
+      where c.auth_user_id is null and c.name = any (t.assignees)
+      order by c.name
+    ),
+    array(
+      select c.name from public."demoDB" c
+      where c.auth_user_id is null and c.name = any (t.assignees)
+      order by c.name
+    ),
+    t.subtasks, t.board_order, t.status
+  from (values
+    ('Contact form & imprint',
+     'Build the contact form and the imprint page for the new website.',
+     'User Story', 3, 'urgent', array['Anna Becker', 'Ben Hoffmann'],
+     '[{"subtaskText": "Create form layout", "completed": true},
+       {"subtaskText": "Add form validation", "completed": false},
+       {"subtaskText": "Write imprint text", "completed": false}]'::jsonb,
+     0, 'todo'),
+    ('Set up CI pipeline',
+     'Run linting and unit tests automatically on every pull request.',
+     'Technical Task', 10, 'medium', array['David Wagner'],
+     '[{"subtaskText": "Configure workflow", "completed": false},
+       {"subtaskText": "Add test step", "completed": false}]'::jsonb,
+     1, 'todo'),
+    ('Newsletter sign-up',
+     'Visitors can subscribe to the monthly newsletter from the footer.',
+     'User Story', 21, 'low', array['Emma Fischer', 'Greta Schneider'],
+     '[]'::jsonb,
+     2, 'todo'),
+    ('Drag and drop on the board',
+     'Move tasks between the board columns with drag and drop.',
+     'Technical Task', 5, 'urgent', array['Ben Hoffmann', 'Clara Schulz', 'Felix Weber'],
+     '[{"subtaskText": "Add drag handles", "completed": true},
+       {"subtaskText": "Save the new status", "completed": true},
+       {"subtaskText": "Support touch devices", "completed": false}]'::jsonb,
+     0, 'inProgress'),
+    ('Responsive navigation',
+     'Adapt the navigation to tablet and mobile screens.',
+     'User Story', 7, 'medium', array['Clara Schulz'],
+     '[{"subtaskText": "Mobile menu", "completed": true},
+       {"subtaskText": "Tablet layout", "completed": false}]'::jsonb,
+     1, 'inProgress'),
+    ('Accessibility check',
+     'Check keyboard navigation, colour contrast and form labels on all pages.',
+     'Technical Task', 4, 'medium', array['Greta Schneider', 'Jonas Richter'],
+     '[{"subtaskText": "Keyboard navigation", "completed": true},
+       {"subtaskText": "Colour contrast", "completed": true}]'::jsonb,
+     0, 'awaitFeedback'),
+    ('Recipe search',
+     'Users can search recipes by title and ingredient.',
+     'User Story', 14, 'low', array['Anna Becker', 'Emma Fischer'],
+     '[]'::jsonb,
+     1, 'awaitFeedback'),
+    ('Project setup',
+     'Create the repository, the folder structure and the shared code style.',
+     'Technical Task', -5, 'low', array['David Wagner', 'Felix Weber'],
+     '[{"subtaskText": "Create repository", "completed": true},
+       {"subtaskText": "Add code style rules", "completed": true}]'::jsonb,
+     0, 'done'),
+    ('Style guide',
+     'Define colours, typography and button styles for the whole app.',
+     'User Story', -2, 'medium', array['Ben Hoffmann', 'Clara Schulz', 'Jonas Richter'],
+     '[]'::jsonb,
+     1, 'done')
+  ) as t(title, description, type, due_in, priority, assignees, subtasks, board_order, status);
+end;
+$$;
+
+revoke all on function public.reset_demo_data() from public, anon, authenticated;

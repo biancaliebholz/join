@@ -7,6 +7,9 @@
 /bazel-out
 /src/app/services/supabase.ts
 
+# Supabase CLI state (linked project ref, pooler URL)
+/supabase/.temp
+
 # Node
 /node_modules
 npm-debug.log

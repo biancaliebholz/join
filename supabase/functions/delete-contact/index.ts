@@ -13,6 +13,7 @@ declare const Deno: {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
 Deno.serve(async (req) => {
@@ -28,13 +29,15 @@ Deno.serve(async (req) => {
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const secretKey = getDefaultSecretKey();
 
-    if (!supabaseUrl || !serviceRoleKey) {
+    if (!supabaseUrl || !secretKey) {
       return json({ error: 'Missing Supabase function environment variables' }, 500);
     }
 
-    const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+    // Privileged client (deletes auth users, bypasses RLS). The secret key only
+    // exists in the function environment and never reaches the browser.
+    const adminClient = createClient(supabaseUrl, secretKey, {
       auth: {
         autoRefreshToken: false,
         persistSession: false,
@@ -73,6 +76,9 @@ Deno.serve(async (req) => {
       return json({ error: 'You can only delete your own account.' }, 403);
     }
 
+    // contact.id was read above: deleting the auth user sets demoDB.auth_user_id
+    // to null (on delete set null), so the row is removed by its id, not by
+    // the user id.
     const { error: deleteUserError } = await adminClient.auth.admin.deleteUser(contact.auth_user_id);
 
     if (deleteUserError) {
@@ -93,6 +99,20 @@ Deno.serve(async (req) => {
     return json({ error: error instanceof Error ? error.message : String(error) }, 500);
   }
 });
+
+// Supabase provides the project's secret API keys to every function as JSON
+// in SUPABASE_SECRET_KEYS, e.g. { "default": "sb_secret_..." }.
+function getDefaultSecretKey(): string | undefined {
+  const keys = Deno.env.get('SUPABASE_SECRET_KEYS');
+  if (!keys) return undefined;
+
+  try {
+    const key = JSON.parse(keys)?.default;
+    return typeof key === 'string' && key ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
